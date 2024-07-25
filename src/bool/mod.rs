@@ -25,11 +25,13 @@ pub type CollectiveKeyShare = keys::CommonReferenceSeededCollectivePublicKeyShar
     [u8; 32],
     parameters::BoolParameters<u64>,
 >;
+#[cfg(feature = "interactive_mp")]
 pub type CollectivePublicKey = keys::PublicKey<
     Vec<Vec<u64>>,
     crate::random::DefaultSecureRng,
     crate::ModularOpsU64<parameters::CiphertextModulus<u64>>,
 >;
+#[cfg(feature = "interactive_mp")]
 pub type ServerKeyShare = keys::CommonReferenceSeededInteractiveMultiPartyServerKeyShare<
     Vec<Vec<u64>>,
     parameters::BoolParameters<u64>,
