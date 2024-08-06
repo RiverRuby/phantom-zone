@@ -77,84 +77,89 @@ fn hiring_match_fhe(a: FheJobCriteria, b: FheJobCriteria) -> FheBool {
 }
 
 /**
- * FHE SETUP CODE
+ * FHE SETUP CODE // ROUND
  */
 
 #[derive(Clone, Serialize, Deserialize)]
 struct ClientKeys {
     client_key: ClientKey,
-    server_key_share: ServerKeyShare,
+    collective_key_share: CollectiveKeyShare,
 }
 
-fn client_setup(id: usize, num_parties: usize) -> ClientKeys {
+fn client_setup() -> ClientKeys {
     let client_key = gen_client_key();
-    let server_key_share = gen_server_key_share(id, num_parties, &client_key); // Changed `ck` to `client_key`
+    let collective_key_share = collective_pk_share(&client_key); // Changed `ck` to `client_key`
 
     ClientKeys {
         client_key,
-        server_key_share,
+        collective_key_share,
     }
-}
-
-fn server_setup(server_key_shares: Vec<ServerKeyShare>) {
-    let server_key = aggregate_server_key_shares(&server_key_shares);
-    server_key.set_server_key();
 }
 
 /**
  * FHE FUNCTION EVAL CODE
  */
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Clone)]
 struct ClientEncryptedData {
-    bool_enc: NonInteractiveBatchedFheBools<Vec<Vec<u64>>>,
+    bool_enc: Vec<FheBool>,
     salary_enc: EncFheUint8,
+    server_key_share: ServerKeyShare,
 }
 
-fn client_encrypt_job_criteria(jc: JobCriteria, ck: ClientKeys) -> ClientEncryptedData {
-    let bool_enc: NonInteractiveBatchedFheBools<_> = ck.client_key.encrypt(
-        [jc.in_market, jc.position]
-            .iter()
-            .copied()
-            .chain(jc.criteria.iter().copied())
-            .collect::<Vec<_>>()
-            .as_slice(),
-    );
-    let salary_enc = ck.client_key.encrypt(vec![jc.salary].as_slice());
+fn client_encrypt_data(
+    id: usize,
+    client_key: ClientKey,
+    shares: Vec<CollectiveKeyShare>,
+    jc: JobCriteria,
+) -> ClientEncryptedData {
+    let collective_pk = aggregate_public_key_shares(&shares);
+    let server_key_share = collective_server_key_share(&client_key, id, 2, &collective_pk);
+    let bool_enc = [jc.in_market, jc.position]
+        .iter()
+        .copied()
+        .chain(jc.criteria.iter().copied())
+        .map(|val| FheBool {
+            data: collective_pk.encrypt(&val),
+        })
+        .collect_vec();
+    let salary_enc = collective_pk.encrypt(vec![jc.salary].as_slice());
 
     ClientEncryptedData {
         bool_enc,
         salary_enc,
+        server_key_share,
     }
 }
 
-fn server_extract_job_criteria(id: usize, data: ClientEncryptedData) -> FheJobCriteria {
-    let bool_enc_ks = data.bool_enc.key_switch(id);
-    let in_market = FheBool {
-        data: bool_enc_ks.extract(0),
-    };
-    let position = FheBool {
-        data: bool_enc_ks.extract(1),
-    };
+fn server_extract_job_criteria(data: ClientEncryptedData) -> FheJobCriteria {
+    let salary = data.salary_enc.extract_at(0);
+
+    let criteria_slice = &data.bool_enc[data.bool_enc.len() - NUM_CRITERIA..];
     let mut criteria: [FheBool; NUM_CRITERIA] = Default::default();
-    for i in 0..NUM_CRITERIA {
-        criteria[i] = FheBool {
-            data: bool_enc_ks.extract(i + 2),
-        };
+    for (i, item) in criteria_slice.iter().enumerate() {
+        criteria[i] = item.clone(); // Clone each item into the array
     }
 
-    let salary = data
-        .salary_enc
-        .unseed::<Vec<Vec<u64>>>()
-        .key_switch(id)
-        .extract_at(0);
-
     FheJobCriteria {
-        in_market,
-        position,
+        in_market: data.bool_enc[0].clone(),
+        position: data.bool_enc[1].clone(),
         salary,
         criteria,
     }
+}
+
+fn server_setup(data_0: ClientEncryptedData, data_1: ClientEncryptedData) {
+    let server_key =
+        aggregate_server_key_shares(&[data_0.server_key_share, data_1.server_key_share]);
+    server_key.set_server_key();
+}
+
+fn server_compute(data_0: ClientEncryptedData, data_1: ClientEncryptedData) -> FheBool {
+    let jc_0 = server_extract_job_criteria(data_0);
+    let jc_1 = server_extract_job_criteria(data_1);
+
+    hiring_match_fhe(jc_0, jc_1)
 }
 
 /**
@@ -170,12 +175,12 @@ fn client_full_decrypt(ck: ClientKeys, result: FheBool, shares: [u64; 2]) -> boo
 }
 
 fn main() {
-    set_parameter_set(ParameterSelector::NonInteractiveLTE2Party);
+    set_parameter_set(ParameterSelector::InteractiveLTE2Party);
 
     /*
      * Phase 1: KEY SETUP
      */
-    println!("Noninteractive MP-FHE Key Setup");
+    println!("Interactive MP-FHE Key Setup");
 
     // set application's common reference seed
     let mut seed = [0u8; 32];
@@ -184,21 +189,10 @@ fn main() {
 
     // Client setup
     let mut now = std::time::Instant::now();
-    let ck_0 = client_setup(0, 2);
-    let ck_1 = client_setup(1, 2);
+    let ck_0 = client_setup();
+    let ck_1 = client_setup();
     println!(
         "(1) Client keys + server shares generated, {:?}ms",
-        now.elapsed().as_millis()
-    );
-
-    // Server setup
-    now = std::time::Instant::now();
-    server_setup(vec![
-        ck_0.clone().server_key_share,
-        ck_1.clone().server_key_share,
-    ]);
-    println!(
-        "(2) Server key aggregated, {:?}ms",
         now.elapsed().as_millis()
     );
 
@@ -223,33 +217,32 @@ fn main() {
         salary: 150,    // can pay up to 1.5mil
         criteria: [true, false, true],
     };
-    let data_0 = client_encrypt_job_criteria(jc_0.clone(), ck_0.clone());
-    let data_1 = client_encrypt_job_criteria(jc_1.clone(), ck_1.clone());
+    let shares = vec![
+        ck_0.collective_key_share.clone(),
+        ck_1.collective_key_share.clone(),
+    ];
+    let data_0: ClientEncryptedData =
+        client_encrypt_data(0, ck_0.client_key.clone(), shares.clone(), jc_0.clone());
+    let data_1 = client_encrypt_data(1, ck_1.client_key.clone(), shares, jc_1.clone());
     println!(
         "(1) Clients encrypt their input with their own key, {:?}ms",
         now.elapsed().as_millis()
     );
 
+    // Server computes aggregate server key
+    server_setup(data_0.clone(), data_1.clone());
+
     // Server extracting data from ciphertext
     now = std::time::Instant::now();
-    let jc_fhe_0 = server_extract_job_criteria(0, data_0);
-    let jc_fhe_1 = server_extract_job_criteria(1, data_1);
-    println!(
-        "(2) Client inputs extracted after key switch, {:?}ms",
-        now.elapsed().as_millis()
-    );
-
-    // Server evaluating function
-    now = std::time::Instant::now();
     let match_res = hiring_match(jc_0.clone(), jc_1.clone());
-    let match_res_fhe = hiring_match_fhe(jc_fhe_0, jc_fhe_1);
-    println!("(3) f1 evaluated, {:?}ms", now.elapsed().as_millis());
+    let match_res_fhe = server_compute(data_0, data_1);
+    println!("(2) Hiring evaluated, {:?}ms", now.elapsed().as_millis());
 
     // Clients produce decryption share
     now = std::time::Instant::now();
     let decryption_shares = [
         client_generate_share(ck_0.clone(), match_res_fhe.clone()),
-        client_generate_share(ck_1, match_res_fhe.clone()),
+        client_generate_share(ck_1.clone(), match_res_fhe.clone()),
     ];
     println!(
         "(4) Decryption shares generated, {:?}ms",
@@ -276,7 +269,7 @@ mod tests {
     // cargo test --release --package phantom-zone --example non_interactive_hiring -- --nocapture
     #[test]
     fn test_hiring_match() {
-        set_parameter_set(ParameterSelector::NonInteractiveLTE2Party);
+        set_parameter_set(ParameterSelector::InteractiveLTE2Party);
 
         println!("Noninteractive MP-FHE Key Setup");
 
@@ -288,12 +281,6 @@ mod tests {
         // Client setup
         let ck_0 = client_setup(0, 2);
         let ck_1 = client_setup(1, 2);
-
-        // Server setup
-        server_setup(vec![
-            ck_0.clone().server_key_share,
-            ck_1.clone().server_key_share,
-        ]);
 
         // try on 25 random cases to ensure same output as plaintext
         for i in 1..25 {
@@ -320,16 +307,22 @@ mod tests {
                     thread_rng().gen_bool(0.8),
                 ],
             };
-            let data_0 = client_encrypt_job_criteria(jc_0.clone(), ck_0.clone());
-            let data_1 = client_encrypt_job_criteria(jc_1.clone(), ck_1.clone());
+            let shares = vec![
+                ck_0.collective_key_share.clone(),
+                ck_1.collective_key_share.clone(),
+            ];
+            let data_0: ClientEncryptedData =
+                client_encrypt_data(0, ck_0.client_key.clone(), shares.clone(), jc_0.clone());
+            let data_1 = client_encrypt_data(1, ck_1.client_key.clone(), shares, jc_1.clone());
 
-            // Server extracting data from ciphertext
-            let jc_fhe_0 = server_extract_job_criteria(0, data_0);
-            let jc_fhe_1 = server_extract_job_criteria(1, data_1);
+            // do server setup on first try
+            if i == 1 {
+                server_setup(data_0.clone(), data_1.clone());
+            }
 
-            // Server evaluating function
+            // server computes server key share + computation
             let match_res = hiring_match(jc_0.clone(), jc_1.clone());
-            let match_res_fhe = hiring_match_fhe(jc_fhe_0, jc_fhe_1);
+            let match_res_fhe = server_compute(data_0, data_1);
 
             // Clients produce decryption share
             let decryption_shares = [

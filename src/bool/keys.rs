@@ -1,5 +1,7 @@
 use std::{collections::HashMap, marker::PhantomData};
 
+use serde::{Deserialize, Serialize};
+
 use crate::{
     backend::{ModInit, VectorOps},
     pbs::WithShoupRepr,
@@ -46,7 +48,7 @@ pub(crate) trait NonInteractiveMultiPartyClientKey {
 ///
 ///     Puncture 3 -> Seed of RLWE secret used as `u` in
 ///                   non-interactive multi-party.
-#[derive(Clone)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct ClientKey<S, E> {
     seed: S,
     parameters: BoolParameters<E>,
@@ -312,6 +314,7 @@ mod impl_seeded_pk {
 }
 
 /// CRS seeded collective public key share
+#[derive(Clone, Serialize, Deserialize)]
 pub struct CommonReferenceSeededCollectivePublicKeyShare<Ro, S, P> {
     /// Public key share polynomial
     share: Ro,
@@ -331,6 +334,7 @@ impl<Ro, S, P> CommonReferenceSeededCollectivePublicKeyShare<Ro, S, P> {
 }
 
 /// Common reference seed seeded interactive multi-party server key share
+#[derive(Clone, Serialize, Deserialize)]
 pub struct CommonReferenceSeededInteractiveMultiPartyServerKeyShare<M: Matrix, P, S> {
     /// Public key encrypted RGSW(m = X^{s[i]}) ciphertexts for LWE secret
     /// indices for which `Self` is the leader. Note that when `Self` is
@@ -1237,7 +1241,7 @@ mod shoup_server_key_eval_domain {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct CommonReferenceSeededNonInteractiveMultiPartyServerKeyShare<M: Matrix, P, S> {
     /// Non-interactive RGSW ciphertexts for LWE secret indices for which user
     /// is the leader
